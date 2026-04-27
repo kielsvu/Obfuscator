@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Separate HTML · CSS · JS Obfuscator</title>
+    <style>
+        body { font-family: monospace; max-width: 1200px; margin: 1rem auto; padding: 0 1rem; }
+        .panels { display: flex; gap: 1rem; flex-wrap: wrap; }
+        .panel { flex: 1; min-width: 300px; }
+        textarea { width: 100%; height: 250px; font-size: 0.85rem; }
+        button { margin: 0.5rem 0; padding: 0.6rem 1.5rem; font-size: 1rem; cursor: pointer; }
+        .output-section { margin-top: 1rem; }
+        .warning { background: #fff3cd; border: 1px solid #ffeeba; padding: 0.5rem; margin: 0.5rem 0; }
+    </style>
+</head>
+<body>
+    <h1>🔧 Separate HTML · CSS · JavaScript Obfuscator</h1>
+    <p>Paste your original <strong>HTML</strong>, <strong>CSS</strong>, and <strong>JavaScript</strong> below.
+    The tool will obfuscate each file and keep class/ID renaming consistent across all three.</p>
+
+    <div class="panels">
+        <div class="panel">
+            <h3>HTML</h3>
+            <textarea id="htmlInput"><!DOCTYPE html>
+<html>
+<head>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="main" class="box highlight">
+        <p>Hello world</p>
+    </div>
+    <script src="script.js"></script>
+</body>
+</html></textarea>
+        </div>
+        <div class="panel">
+            <h3>CSS</h3>
+            <textarea id="cssInput">.box { color: red; }
+#main { padding: 20px; }
+.highlight { background: yellow; }</textarea>
+        </div>
+        <div class="panel">
+            <h3>JavaScript</h3>
+            <textarea id="jsInput">document.querySelector('.box').textContent = 'Changed!';
+document.getElementById('main').style.border = '2px solid blue';</textarea>
+        </div>
+    </div>
+
+    <button id="obfuscateBtn">⚙️ Obfuscate Everything</button>
+
+    <div class="output-section">
+        <h3>Obfuscated Output</h3>
+        <div class="panels">
+            <div class="panel">
+                <strong>Obfuscated HTML</strong> <button onclick="copyText('htmlOutput')">📋 Copy</button>
+                <textarea id="htmlOutput" readonly></textarea>
+            </div>
+            <div class="panel">
+                <strong>Obfuscated CSS</strong> <button onclick="copyText('cssOutput')">📋 Copy</button>
+                <textarea id="cssOutput" readonly></textarea>
+            </div>
+            <div class="panel">
+                <strong>Obfuscated JavaScript</strong> <button onclick="copyText('jsOutput')">📋 Copy</button>
+                <textarea id="jsOutput" readonly></textarea>
+            </div>
+        </div>
+    </div>
+
+    <div class="warning">
+        ⚠️ If you use a <strong>GitHub Pages verification meta tag</strong>, paste it into the HTML output manually afterwards.<br>
+        The custom domain itself (<code>CNAME</code> + DNS) is never affected.
+    </div>
+
+    <!-- Load the JS obfuscator library -->
+    <script src="https://unpkg.com/javascript-obfuscator@4.1.0/dist/index.browser.js"></script>
+    <script>
+        (function() {
+            const htmlIn = document.getElementById('htmlInput');
+            const cssIn = document.getElementById('cssInput');
+            const jsIn = document.getElementById('jsInput');
+            const htmlOut = document.getElementById('htmlOutput');
+            const cssOut = document.getElementById('cssOutput');
+            const jsOut = document.getElementById('jsOutput');
+
+            // ---- Helpers ----
+            function randomName(i) {
+                const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+                let name;
+                do {
+                    name = '';
+                    for (let j = 0; j < 4; j++) name += chars[Math.floor(Math.random() * chars.length)];
+                } while (/^[0-9]/.test(name));
+                return name + '_' + i;
+            }
+
+            function escapeRx(s) {
+                return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            }
+
+            // ---- 1. Collect identifiers from all three sources ----
+            function collectAllIdentifiers(html, css, js) {
+                const classes = new Set();
+                const ids = new Set();
+                // From HTML
+                const doc = new DOMParser().parseFromString(html, 'text/html');
+                doc.querySelectorAll('*').forEach(el => {
+                    if (el.hasAttribute('class')) {
+                        el.getAttribute('class').split(/\s+/).forEach(c => c && classes.add(c));
+                    }
+                    if (el.id) ids.add(el.id);
+                });
+                // From CSS
+                const cssClassRe = /\.([a-zA-Z_-][\w-]*)/g;
+                const cssIdRe = /#([a-zA-Z_-][\w-]*)/g;
+                let m;
+                while ((m = cssClassRe.exec(css)) !== null) classes.add(m[1]);
+                while ((m = cssIdRe.exec(css)) !== null) ids.add(m[1]);
+                // From JS (string literals that exactly match known classes/ids – very basic)
+                // We'll scan JS for quoted strings, check if they're in the sets after initial collection
+                const jsStrRe = /['"]([a-zA-Z_-][\w-]*)['"]/g;
+                while ((m = jsStrRe.exec(js)) !== null) {
+                    const val = m[1];
+                    // we can't be sure without context, but we'll add it as a candidate
+                    // to be safe, add all string literals that look like class/id names
+                    if (/^[a-zA-Z_-][\w-]*$/.test(val)) {
+                        classes.add(val);
+                        ids.add(val);   // will be filtered later
+                    }
+                }
+                return { classes: [...classes], ids: [...ids] };
+            }
+
+            function buildMaps(identifiers) {
+                const classMap = {};
+                identifiers.classes.forEach((c, i) => classMap[c] = randomName(i));
+                const idMap = {};
+                identifiers.ids.forEach((id, i) => idMap[id] = randomName(identifiers.classes.length + i));
+                return { classMap, idMap };
+            }
+
+            // ---- Obfuscation functions that apply already-built maps ----
+            function obfuscateHTML(html, classMap, idMap) {
+                let out = html.replace(/<!--[\s\S]*?-->/g, '');
+                // Minify safely
+                out = out.replace(/\s{2,}/g, ' ').replace(/>\s+</g, '><');
+                // Rename classes in class="..."
+                for (const [oldName, newName] of Object.entries(classMap)) {
+                    const re = new RegExp('class\\s*=\\s*["\']([^"\']*\\b)' + escapeRx(oldName) + '(\\b[^"\']*)["\']', 'g');
+                    out = out.replace(re, (_, p1, p2) => 'class="' + p1 + newName + p2 + '"');
+                }
+                // Rename ids in id="..."
+                for (const [oldName, newName] of Object.entries(idMap)) {
+                    const re = new RegExp('id\\s*=\\s*["\']' + escapeRx(oldName) + '["\']', 'g');
+                    out = out.replace(re, 'id="' + newName + '"');
+                }
+                // Optional: hex-encode some characters (outside tags)
+                let result = '';
+                let insideTag = false;
+                for (let i = 0; i < out.length; i++) {
+                    const ch = out[i];
+                    if (ch === '<') insideTag = true;
+                    else if (ch === '>') insideTag = false;
+                    if (insideTag || ch === '<' || ch === '>') {
+                        result += ch;
+                    } else {
+                        if (ch === ' ' || ch === '\n' || ch === '\r') result += ch;
+                        else result += Math.random() < 0.2 ? '&#x' + ch.charCodeAt(0).toString(16) + ';' : ch;
+                    }
+                }
+                return result;
+            }
+
+            function obfuscateCSS(css, classMap, idMap) {
+                let out = css.replace(/\/\*[\s\S]*?\*\//g, '');
+                // Minify
+                out = out.replace(/\s+/g, ' ')
+                         .replace(/\s*([{};,:>+~])\s*/g, '$1')
+                         .replace(/;}/g, '}')
+                         .replace(/0(px|em|rem|%)/g, '0');
+                // Rename classes & ids
+                for (const [oldName, newName] of Object.entries(classMap)) {
+                    const re = new RegExp('\\.' + escapeRx(oldName) + '\\b', 'g');
+                    out = out.replace(re, '.' + newName);
+                }
+                for (const [oldName, newName] of Object.entries(idMap)) {
+                    const re = new RegExp('#' + escapeRx(oldName) + '\\b', 'g');
+                    out = out.replace(re, '#' + newName);
+                }
+                return out;
+            }
+
+            function obfuscateJS(js, classMap, idMap) {
+                // First replace known class/ID strings in the source code with their new names
+                let preprocessed = js;
+                for (const [oldName, newName] of Object.entries(classMap)) {
+                    // Replace exact string literals of the class name
+                    const strRe = new RegExp('([\'"])' + escapeRx(oldName) + '\\1', 'g');
+                    preprocessed = preprocessed.replace(strRe, "'" + newName + "'");
+                }
+                for (const [oldName, newName] of Object.entries(idMap)) {
+                    const strRe = new RegExp('([\'"])' + escapeRx(oldName) + '\\1', 'g');
+                    preprocessed = preprocessed.replace(strRe, "'" + newName + "'");
+                }
+                // Use javascript-obfuscator
+                const opts = {
+                    compact: true,
+                    controlFlowFlattening: true,
+                    controlFlowFlatteningThreshold: 1,
+                    deadCodeInjection: true,
+                    deadCodeInjectionThreshold: 1,
+                    stringArray: true,
+                    stringArrayEncoding: ['base64'],
+                    stringArrayThreshold: 1,
+                    renameGlobals: false,
+                    target: 'browser',
+                    selfDefending: true,
+                    debugProtection: true,
+                    debugProtectionInterval: 2000,
+                };
+                const result = JavaScriptObfuscator.obfuscate(preprocessed, opts);
+                return result.getObfuscatedCode();
+            }
+
+            // ---- Main action ----
+            document.getElementById('obfuscateBtn').addEventListener('click', () => {
+                const html = htmlIn.value.trim();
+                const css = cssIn.value.trim();
+                const js = jsIn.value.trim();
+                if (!html && !css && !js) return;
+
+                // 1. Collect identifiers
+                const identifiers = collectAllIdentifiers(html, css, js);
+                const { classMap, idMap } = buildMaps(identifiers);
+
+                // 2. Obfuscate each
+                htmlOut.value = obfuscateHTML(html, classMap, idMap);
+                cssOut.value = obfuscateCSS(css, classMap, idMap);
+                jsOut.value = obfuscateJS(js, classMap, idMap);
+            });
+
+            // Copy helper
+            window.copyText = function(id) {
+                const ta = document.getElementById(id);
+                ta.select();
+                document.execCommand('copy');
+                alert('Copied!');
+            };
+        })();
+    </script>
+</body>
+</html>
